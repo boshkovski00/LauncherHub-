@@ -18,4 +18,3 @@ Windows 10 oder 11 und Windows PowerShell 5.1 werden benötigt. Alle Dateien mü
 - Die Versionsprüfung nutzt WinGet, falls es auf dem PC verfügbar ist. Ein WinGet-Hinweis ist kein sicherer Beleg für ein notwendiges Update. Der Hub installiert nichts.
 
 Jeder Windows-Nutzer hat eine eigene Auswahl unter `%APPDATA%\LauncherHub\config.json`. Diese Konfigurationsdatei gehört **nicht** zum Download; jeder PC erkennt seine eigenen Launcher.
-
