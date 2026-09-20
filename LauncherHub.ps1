@@ -6,6 +6,7 @@ $appData = Join-Path $env:APPDATA 'LauncherHub'
 $configPath = Join-Path $appData 'config.json'
 $statusPath = Join-Path $appData 'updates.json'
 $helperPath = Join-Path $PSScriptRoot 'LauncherHubUpdates.ps1'
+$startupFolder = [Environment]::GetFolderPath([Environment+SpecialFolder]::Startup)
 $catalog = @{
     'Battle.net'              = @{ Process = '^(Battle\.net|BattleNet)$'; Package = 'Blizzard.BattleNet'; Color = '#2C89FF' }
     'CurseForge'              = @{ Process = '^CurseForge$'; Package = ''; Color = '#F16B31' }
@@ -30,6 +31,35 @@ function Save-Config {
     if (-not (Test-Path -LiteralPath $appData)) { New-Item -ItemType Directory -Path $appData -Force | Out-Null }
     @{ Entries=@($script:entries); HiddenNames=@($script:hiddenNames) } |
         ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $configPath -Encoding UTF8
+}
+
+function Get-StartupPath($entry) {
+    $safeName = [regex]::Replace([string]$entry.Name, '[<>:"/\\|?*]', '_')
+    $bytes = [System.Text.Encoding]::UTF8.GetBytes(([string]$entry.Path).ToLowerInvariant())
+    $hash = [System.Security.Cryptography.SHA256]::Create()
+    try { $key = ([System.BitConverter]::ToString($hash.ComputeHash($bytes))).Replace('-', '').Substring(0, 8) }
+    finally { $hash.Dispose() }
+    return (Join-Path $startupFolder "LauncherHub - $safeName-$key.lnk")
+}
+
+function Set-LauncherStartup($entry, [bool]$enabled) {
+    $destination = Get-StartupPath $entry
+    if ($enabled) {
+        if (Test-Path -LiteralPath $destination -PathType Leaf) { return }
+        if (-not (Test-Path -LiteralPath $entry.Path -PathType Leaf)) { throw "Launcher-Datei fehlt: $($entry.Path)" }
+        if ([System.IO.Path]::GetExtension($entry.Path) -eq '.lnk') {
+            Copy-Item -LiteralPath $entry.Path -Destination $destination -ErrorAction Stop
+        } else {
+            $shell = New-Object -ComObject WScript.Shell
+            $shortcut = $shell.CreateShortcut($destination)
+            $shortcut.TargetPath = $entry.Path
+            $shortcut.WorkingDirectory = Split-Path -Parent $entry.Path
+            $shortcut.Description = "Autostart für $($entry.Name) über Launcher Hub"
+            $shortcut.Save()
+        }
+    } elseif (Test-Path -LiteralPath $destination -PathType Leaf) {
+        Remove-Item -LiteralPath $destination -Force -ErrorAction Stop
+    }
 }
 
 function Find-ExecutableInInstall($root, $fileName) {
@@ -145,15 +175,15 @@ $xaml = @'
     </Style>
   </Window.Resources>
   <Grid>
-    <Grid.RowDefinitions><RowDefinition Height="220"/><RowDefinition Height="*"/><RowDefinition Height="48"/></Grid.RowDefinitions>
+    <Grid.RowDefinitions><RowDefinition Height="154"/><RowDefinition Height="*"/><RowDefinition Height="42"/></Grid.RowDefinitions>
     <Border Grid.Row="0" Background="#142039" BorderBrush="#334F70" BorderThickness="0,0,0,1">
-      <Grid Margin="32,24,32,20">
+      <Grid Margin="30,14,30,10">
         <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
         <StackPanel>
-          <TextBlock Text="DEIN LAUNCHPAD" Foreground="#74D8FF" FontWeight="Bold" FontSize="13"/>
-          <TextBlock Text="Alles an einem Ort." FontSize="35" FontWeight="SemiBold" Margin="0,4,0,3"/>
-          <TextBlock Text="Launcher starten, verwalten und ihren Status prüfen." Foreground="#ADC0DA" FontSize="14"/>
-          <StackPanel Orientation="Horizontal" Margin="0,19,0,0">
+          <StackPanel Orientation="Horizontal"><TextBlock Text="LAUNCHER HUB" Foreground="#74D8FF" FontWeight="Bold" FontSize="12"/><TextBlock Text="  ·  by Teo" Foreground="#91A9C6" FontSize="12"/></StackPanel>
+          <TextBlock Text="Alles an einem Ort." FontSize="27" FontWeight="SemiBold" Margin="0,1,0,1"/>
+          <TextBlock Text="Launcher starten, verwalten und ihren Status prüfen." Foreground="#ADC0DA" FontSize="12"/>
+          <StackPanel Orientation="Horizontal" Margin="0,11,0,0">
             <Border Background="#24435B" CornerRadius="14" Padding="12,6" Margin="0,0,9,0"><TextBlock x:Name="TotalCount" Text="0 Launcher" Foreground="#CDEAFF"/></Border>
             <Border Background="#164834" CornerRadius="14" Padding="12,6" Margin="0,0,9,0"><TextBlock x:Name="RunningCount" Text="0 aktiv" Foreground="#97F5BE"/></Border>
             <Border Background="#5A4227" CornerRadius="14" Padding="12,6"><TextBlock x:Name="UpdateCount" Text="Versionshinweise werden geprüft" Foreground="#FFDBA3"/></Border>
@@ -167,7 +197,7 @@ $xaml = @'
       </Grid>
     </Border>
     <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" Padding="20,16,20,16">
-      <WrapPanel x:Name="Cards" ItemWidth="252" ItemHeight="236"/>
+      <WrapPanel x:Name="Cards" ItemWidth="252" ItemHeight="250"/>
     </ScrollViewer>
     <Border Grid.Row="2" Background="#111A29" BorderBrush="#26354C" BorderThickness="0,1,0,0">
       <TextBlock x:Name="Footer" Text="Laufstatus wird regelmäßig aktualisiert · Versionsprüfung läuft" Foreground="#8CA0BA" VerticalAlignment="Center" Margin="32,0"/>
@@ -230,15 +260,30 @@ function Resolve-Target($path) {
     return $path
 }
 
+function Update-StartupCheckbox($checkbox, [bool]$enabled) {
+    if ($script:startupGuard) { return }
+    $entry = @($script:entries | Where-Object Path -eq ([string]$checkbox.Tag)) | Select-Object -First 1
+    if (-not $entry) { return }
+    try {
+        Set-LauncherStartup $entry $enabled
+        $footer.Text = if ($enabled) { "Autostart für $($entry.Name) aktiviert." } else { "Autostart für $($entry.Name) deaktiviert." }
+    } catch {
+        $script:startupGuard = $true
+        $checkbox.IsChecked = -not $enabled
+        $script:startupGuard = $false
+        [System.Windows.MessageBox]::Show("Autostart konnte nicht geändert werden: $($_.Exception.Message)", 'Launcher Hub') | Out-Null
+    }
+}
+
 function New-Card($item) {
     $meta = Get-Meta $item
     $outer = [System.Windows.Controls.Border]::new()
-    $outer.Width = 232; $outer.Height = 216
+    $outer.Width = 232; $outer.Height = 230
     $outer.Margin = '10'; $outer.Padding = '17'; $outer.CornerRadius = '18'
     $outer.Background = Brush '#1B2638'; $outer.BorderBrush = Brush '#34445E'
     $outer.BorderThickness = '1'; $outer.Tag = $item.Path
     $stack = [System.Windows.Controls.StackPanel]::new(); $outer.Child = $stack
-    $top = [System.Windows.Controls.Grid]::new(); $top.Height = 58
+    $top = [System.Windows.Controls.Grid]::new(); $top.Height = 54
     $top.ColumnDefinitions.Add([System.Windows.Controls.ColumnDefinition]::new())
     $col = [System.Windows.Controls.ColumnDefinition]::new(); $col.Width = 'Auto'; $top.ColumnDefinitions.Add($col)
     $col2 = [System.Windows.Controls.ColumnDefinition]::new(); $col2.Width = 'Auto'; $top.ColumnDefinitions.Add($col2)
@@ -250,7 +295,8 @@ function New-Card($item) {
     $dot.Fill = Brush '#687A91'; $dot.VerticalAlignment = 'Top'; $dot.Margin = '0,6,3,0'
     [System.Windows.Controls.Grid]::SetColumn($dot, 1); $top.Children.Add($dot) | Out-Null
     $remove = [System.Windows.Controls.Button]::new(); $remove.Content = '×'; $remove.Tag = $item.Path
-    $remove.Width = 25; $remove.Height = 25; $remove.Margin = '12,0,0,0'
+    $remove.Width = 21; $remove.Height = 21; $remove.Margin = '12,-11,-9,0'
+    $remove.VerticalAlignment = 'Top'; $remove.HorizontalAlignment = 'Right'
     $remove.Background = Brush '#34445C'; $remove.Foreground = Brush '#DCE8FA'
     $remove.BorderThickness = '0'; $remove.Cursor = 'Hand'
     $remove.ToolTip = 'Nur aus dem Hub entfernen'
@@ -260,6 +306,8 @@ function New-Card($item) {
         $path = [string]$sender.Tag
         $entry = @($script:entries | Where-Object Path -eq $path) | Select-Object -First 1
         if ($entry) {
+            try { Set-LauncherStartup $entry $false }
+            catch { [System.Windows.MessageBox]::Show("Autostart konnte nicht entfernt werden: $($_.Exception.Message)", 'Launcher Hub') | Out-Null; return }
             $script:entries = @($script:entries | Where-Object Path -ne $path)
             $script:hiddenNames += $entry.Name
             Save-Config; Rebuild-Cards
@@ -279,9 +327,21 @@ function New-Card($item) {
     $badgeText.FontSize = 11; $badgeText.Foreground = Brush '#FFD793'; $badge.Child = $badgeText
     $stack.Children.Add($badge) | Out-Null
     $open = [System.Windows.Controls.Button]::new(); $open.Content = 'ÖFFNEN  →'; $open.Tag = $item.Path
-    $open.Height = 29; $open.HorizontalAlignment = 'Left'; $open.Margin = '0,9,0,0'
+    $open.Height = 29; $open.HorizontalAlignment = 'Left'; $open.Margin = '0,0,12,0'
     $open.Padding = '10,3'; $open.Background = Brush '#2B4963'; $open.Foreground = Brush '#C7ECFF'
-    $open.BorderThickness = '0'; $open.Cursor = 'Hand'; $stack.Children.Add($open) | Out-Null
+    $open.BorderThickness = '0'; $open.Cursor = 'Hand'
+    $actions = [System.Windows.Controls.StackPanel]::new(); $actions.Orientation = 'Horizontal'; $actions.Margin = '0,11,0,0'
+    $actions.Children.Add($open) | Out-Null
+    $autoStart = [System.Windows.Controls.CheckBox]::new()
+    $autoStart.Content = 'Autostart'; $autoStart.Tag = $item.Path
+    $autoStart.FontSize = 12; $autoStart.Foreground = Brush '#C7D9ED'
+    $autoStart.VerticalAlignment = 'Center'; $autoStart.Cursor = 'Hand'
+    $autoStart.ToolTip = 'Mit Windows starten (über Launcher Hub)'
+    $autoStart.IsChecked = Test-Path -LiteralPath (Get-StartupPath $item) -PathType Leaf
+    $autoStart.Add_Checked({ param($sender,$e) Update-StartupCheckbox $sender $true })
+    $autoStart.Add_Unchecked({ param($sender,$e) Update-StartupCheckbox $sender $false })
+    $actions.Children.Add($autoStart) | Out-Null
+    $stack.Children.Add($actions) | Out-Null
     $open.Add_Click({
         param($sender,$e)
         try { Start-Process -FilePath $sender.Tag }
