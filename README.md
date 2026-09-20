@@ -14,6 +14,8 @@ Windows 10 oder 11 und Windows PowerShell 5.1 werden benötigt. Alle Dateien mü
 - **Auto-Erkennung** sucht bekannte Launcher im Startmenü, auf dem Desktop und in Windows-Installationseinträgen.
 - **Hinzufügen** nimmt eigene `.exe`-, `.lnk`- oder `.url`-Dateien auf.
 - Das **×** auf einer Kachel entfernt den Eintrag nur aus dem Hub. Das Programm bleibt installiert.
+- Kacheln lassen sich mit der Maus auf andere Kacheln ziehen. Die Reihenfolge wird gespeichert.
+- Größe und Position des Fensters bleiben nach dem Schließen erhalten.
 - **Autostart** auf jeder Kachel legt eine Verknüpfung im persönlichen Windows-Autostart-Ordner an oder entfernt sie. Programmeigene Autostart-Einstellungen bleiben davon unberührt; sind sie ebenfalls aktiv, kann der Launcher doppelt starten.
 - Der grüne Punkt zeigt einen erkannten laufenden Prozess an.
 - Die Versionsprüfung nutzt WinGet, falls es auf dem PC verfügbar ist. Ein WinGet-Hinweis ist kein sicherer Beleg für ein notwendiges Update. Der Hub installiert nichts.

@@ -29,7 +29,7 @@ $catalog = @{
 
 function Save-Config {
     if (-not (Test-Path -LiteralPath $appData)) { New-Item -ItemType Directory -Path $appData -Force | Out-Null }
-    @{ Entries=@($script:entries); HiddenNames=@($script:hiddenNames) } |
+    @{ Entries=@($script:entries); HiddenNames=@($script:hiddenNames); Window=$script:windowSettings } |
         ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $configPath -Encoding UTF8
 }
 
@@ -137,17 +137,19 @@ function Add-Detected {
 
 $script:entries = @()
 $script:hiddenNames = @()
+$script:windowSettings = $null
 if (Test-Path -LiteralPath $configPath) {
     $saved = Get-Content -LiteralPath $configPath -Raw -Encoding UTF8 | ConvertFrom-Json
     $script:entries = @($saved.Entries | Where-Object { $_ -and $_.Path -and (Test-Path -LiteralPath $_.Path -PathType Leaf) })
     $script:hiddenNames = @($saved.HiddenNames)
+    $script:windowSettings = $saved.Window
 } else {
     Add-Detected | Out-Null
 }
 
 if ($Check) {
     Write-Output "Launcher: $($script:entries.Count)"
-    $script:entries | Sort-Object Name | ForEach-Object { Write-Output "$($_.Name) | $($_.Path)" }
+    $script:entries | ForEach-Object { Write-Output "$($_.Name) | $($_.Path)" }
     exit 0
 }
 
@@ -208,6 +210,25 @@ $xaml = @'
 
 $reader = New-Object System.Xml.XmlNodeReader([xml]$xaml)
 $window = [Windows.Markup.XamlReader]::Load($reader)
+if ($script:windowSettings) {
+    $view = $script:windowSettings
+    if ($view.Width -ge 760 -and $view.Width -le 5000 -and $view.Height -ge 520 -and $view.Height -le 3000) {
+        $window.Width = [double]$view.Width
+        $window.Height = [double]$view.Height
+        $screenLeft = [System.Windows.SystemParameters]::VirtualScreenLeft
+        $screenTop = [System.Windows.SystemParameters]::VirtualScreenTop
+        $screenRight = $screenLeft + [System.Windows.SystemParameters]::VirtualScreenWidth
+        $screenBottom = $screenTop + [System.Windows.SystemParameters]::VirtualScreenHeight
+        if ($null -ne $view.Left -and $null -ne $view.Top -and
+            [double]$view.Left -ge $screenLeft -and [double]$view.Left -lt ($screenRight - 100) -and
+            [double]$view.Top -ge $screenTop -and [double]$view.Top -lt ($screenBottom - 80)) {
+            $window.Left = [double]$view.Left
+            $window.Top = [double]$view.Top
+            $window.WindowStartupLocation = 'Manual'
+        }
+        if ($view.Maximized) { $window.WindowState = 'Maximized' }
+    }
+}
 $cardsPanel = $window.FindName('Cards')
 $totalCount = $window.FindName('TotalCount')
 $runningCount = $window.FindName('RunningCount')
@@ -282,6 +303,8 @@ function New-Card($item) {
     $outer.Margin = '10'; $outer.Padding = '17'; $outer.CornerRadius = '18'
     $outer.Background = Brush '#1B2638'; $outer.BorderBrush = Brush '#34445E'
     $outer.BorderThickness = '1'; $outer.Tag = $item.Path
+    $outer.AllowDrop = $true
+    $outer.ToolTip = 'Zum Sortieren ziehen und auf einer anderen Kachel ablegen'
     $stack = [System.Windows.Controls.StackPanel]::new(); $outer.Child = $stack
     $top = [System.Windows.Controls.Grid]::new(); $top.Height = 54
     $top.ColumnDefinitions.Add([System.Windows.Controls.ColumnDefinition]::new())
@@ -349,6 +372,60 @@ function New-Card($item) {
     })
     $outer.Add_MouseEnter({ param($sender,$e) $sender.Background = Brush '#273852' })
     $outer.Add_MouseLeave({ param($sender,$e) $sender.Background = Brush '#1B2638'; $sender.BorderBrush = Brush '#34445E' })
+    $outer.Add_PreviewMouseLeftButtonDown({
+        param($sender,$e)
+        $source = $e.OriginalSource
+        while ($source -and $source -ne $sender) {
+            if ($source -is [System.Windows.Controls.Primitives.ButtonBase]) { return }
+            $source = [System.Windows.Media.VisualTreeHelper]::GetParent($source)
+        }
+        $script:dragPath = [string]$sender.Tag
+        $script:dragStart = $e.GetPosition($cardsPanel)
+    })
+    $outer.Add_PreviewMouseMove({
+        param($sender,$e)
+        if (-not $script:dragPath -or $e.LeftButton -ne [System.Windows.Input.MouseButtonState]::Pressed) { return }
+        $point = $e.GetPosition($cardsPanel)
+        if ([math]::Abs($point.X - $script:dragStart.X) -lt 7 -and
+            [math]::Abs($point.Y - $script:dragStart.Y) -lt 7) { return }
+        $path = $script:dragPath
+        $script:dragPath = $null
+        $data = [System.Windows.DataObject]::new('LauncherHubPath', $path)
+        [System.Windows.DragDrop]::DoDragDrop($sender, $data, [System.Windows.DragDropEffects]::Move) | Out-Null
+    })
+    $outer.Add_PreviewMouseLeftButtonUp({ $script:dragPath = $null })
+    $outer.Add_DragOver({
+        param($sender,$e)
+        $e.Effects = if ($e.Data.GetDataPresent('LauncherHubPath') -and
+            [string]$e.Data.GetData('LauncherHubPath') -ne [string]$sender.Tag) {
+            [System.Windows.DragDropEffects]::Move
+        } else { [System.Windows.DragDropEffects]::None }
+        $sender.BorderBrush = if ($e.Effects -eq [System.Windows.DragDropEffects]::Move) { Brush '#74D8FF' } else { Brush '#34445E' }
+        $e.Handled = $true
+    })
+    $outer.Add_DragLeave({ param($sender,$e) $sender.BorderBrush = Brush '#34445E' })
+    $outer.Add_Drop({
+        param($sender,$e)
+        if (-not $e.Data.GetDataPresent('LauncherHubPath')) { return }
+        $from = [string]$e.Data.GetData('LauncherHubPath')
+        $to = [string]$sender.Tag
+        if ($from -eq $to) { return }
+        $after = $e.GetPosition($sender).X -ge ($sender.ActualWidth / 2)
+        $moving = @($script:entries | Where-Object Path -eq $from) | Select-Object -First 1
+        if (-not $moving -or @($script:entries | Where-Object Path -eq $to).Count -eq 0) { return }
+        $ordered = New-Object 'System.Collections.Generic.List[object]'
+        foreach ($entry in $script:entries) {
+            if ($entry.Path -eq $from) { continue }
+            if ($entry.Path -eq $to -and -not $after) { $ordered.Add($moving) }
+            $ordered.Add($entry)
+            if ($entry.Path -eq $to -and $after) { $ordered.Add($moving) }
+        }
+        $script:entries = @($ordered.ToArray())
+        Save-Config
+        Rebuild-Cards
+        $footer.Text = 'Reihenfolge gespeichert.'
+        $e.Handled = $true
+    })
     $cardsPanel.Children.Add($outer) | Out-Null
     $script:cards += [pscustomobject]@{ Name=$item.Name; Path=$item.Path; Meta=$meta; Dot=$dot; State=$state; Badge=$badge; BadgeText=$badgeText }
 }
@@ -356,7 +433,7 @@ function New-Card($item) {
 function Rebuild-Cards {
     $cardsPanel.Children.Clear()
     $script:cards = @()
-    foreach ($item in @($script:entries | Sort-Object Name)) { New-Card $item }
+    foreach ($item in $script:entries) { New-Card $item }
     $totalCount.Text = "$($script:cards.Count) Launcher"
     Refresh-Processes
     if ($script:updatesReady) { Apply-UpdateResults }
@@ -480,6 +557,15 @@ $addButton.Add_Click({
             $footer.Text = "$name hinzugefügt."
         }
     }
+})
+$window.Add_Closing({
+    $bounds = if ($window.WindowState -eq 'Normal') { $window } else { $window.RestoreBounds }
+    $script:windowSettings = [pscustomobject]@{
+        Width=[math]::Round($bounds.Width); Height=[math]::Round($bounds.Height)
+        Left=[math]::Round($bounds.Left); Top=[math]::Round($bounds.Top)
+        Maximized=($window.WindowState -eq 'Maximized')
+    }
+    Save-Config
 })
 $window.Add_Closed({
     $timer.Stop()
