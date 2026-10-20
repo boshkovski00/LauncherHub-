@@ -4,8 +4,11 @@ $ErrorActionPreference = 'Stop'
 $desktop = [Environment]::GetFolderPath('DesktopDirectory')
 $appData = Join-Path $env:APPDATA 'LauncherHub'
 $configPath = Join-Path $appData 'config.json'
-$statusPath = Join-Path $appData 'updates.json'
+$sessionId = [guid]::NewGuid().ToString('N')
+$statusPath = Join-Path $appData "updates-$sessionId.json"
+$installPath = Join-Path $appData "install-$sessionId.json"
 $helperPath = Join-Path $PSScriptRoot 'LauncherHubUpdates.ps1'
+. (Join-Path $PSScriptRoot 'LauncherHub.UpdateCore.ps1')
 $startupFolder = [Environment]::GetFolderPath([Environment+SpecialFolder]::Startup)
 $catalog = @{
     'Battle.net'              = @{ Process = '^(Battle\.net|BattleNet)$'; Package = 'Blizzard.BattleNet'; Color = '#2C89FF' }
@@ -174,13 +177,14 @@ $xaml = @'
           <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
         </Border>
       </ControlTemplate></Setter.Value></Setter>
+      <Style.Triggers><Trigger Property="IsEnabled" Value="False"><Setter Property="Opacity" Value="0.45"/></Trigger></Style.Triggers>
     </Style>
   </Window.Resources>
-  <Grid>
-    <Grid.RowDefinitions><RowDefinition Height="154"/><RowDefinition Height="*"/><RowDefinition Height="42"/></Grid.RowDefinitions>
+  <Grid Background="#0B101A">
+    <Grid.RowDefinitions><RowDefinition Height="210"/><RowDefinition Height="*"/><RowDefinition Height="58"/></Grid.RowDefinitions>
     <Border Grid.Row="0" Background="#142039" BorderBrush="#334F70" BorderThickness="0,0,0,1">
       <Grid Margin="30,14,30,10">
-        <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+        <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
         <StackPanel>
           <StackPanel Orientation="Horizontal"><TextBlock Text="LAUNCHER HUB" Foreground="#74D8FF" FontWeight="Bold" FontSize="12"/><TextBlock Text="  ·  by Teo" Foreground="#91A9C6" FontSize="12"/></StackPanel>
           <TextBlock Text="Alles an einem Ort." FontSize="27" FontWeight="SemiBold" Margin="0,1,0,1"/>
@@ -188,21 +192,22 @@ $xaml = @'
           <StackPanel Orientation="Horizontal" Margin="0,11,0,0">
             <Border Background="#24435B" CornerRadius="14" Padding="12,6" Margin="0,0,9,0"><TextBlock x:Name="TotalCount" Text="0 Launcher" Foreground="#CDEAFF"/></Border>
             <Border Background="#164834" CornerRadius="14" Padding="12,6" Margin="0,0,9,0"><TextBlock x:Name="RunningCount" Text="0 aktiv" Foreground="#97F5BE"/></Border>
-            <Border Background="#5A4227" CornerRadius="14" Padding="12,6"><TextBlock x:Name="UpdateCount" Text="Versionshinweise werden geprüft" Foreground="#FFDBA3"/></Border>
+            <Border Background="#5A4227" CornerRadius="14" Padding="12,6"><TextBlock x:Name="UpdateCount" Text="Updates werden geprüft" Foreground="#FFDBA3"/></Border>
           </StackPanel>
         </StackPanel>
-        <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Top">
+        <WrapPanel Grid.Row="1" Margin="0,14,0,0">
           <Button x:Name="ScanButton" Content="Auto-Erkennung" Style="{StaticResource TopButton}" Margin="0,0,9,0"/>
           <Button x:Name="AddButton" Content="+ Hinzufügen" Style="{StaticResource TopButton}" Margin="0,0,9,0"/>
-          <Button x:Name="RefreshButton" Content="↻ Prüfen" Style="{StaticResource TopButton}"/>
-        </StackPanel>
+          <Button x:Name="RefreshButton" Content="↻ Prüfen" Style="{StaticResource TopButton}" Margin="0,0,9,0"/>
+          <Button x:Name="UpdateAllButton" Content="Alle Updates starten" Style="{StaticResource TopButton}" Background="#215B47" IsEnabled="False" ToolTip="Aktualisiert erkannte Programme im Hub nacheinander. Windows kann um Berechtigung bitten."/>
+        </WrapPanel>
       </Grid>
     </Border>
     <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" Padding="20,16,20,16">
-      <WrapPanel x:Name="Cards" ItemWidth="252" ItemHeight="250"/>
+      <WrapPanel x:Name="Cards" ItemWidth="252" ItemHeight="332"/>
     </ScrollViewer>
     <Border Grid.Row="2" Background="#111A29" BorderBrush="#26354C" BorderThickness="0,1,0,0">
-      <TextBlock x:Name="Footer" Text="Laufstatus wird regelmäßig aktualisiert · Versionsprüfung läuft" Foreground="#8CA0BA" VerticalAlignment="Center" Margin="32,0"/>
+      <TextBlock x:Name="Footer" Text="Laufstatus wird regelmäßig aktualisiert · Versionsprüfung läuft" Foreground="#8CA0BA" TextWrapping="Wrap" VerticalAlignment="Center" Margin="32,0"/>
     </Border>
   </Grid>
 </Window>
@@ -237,11 +242,20 @@ $footer = $window.FindName('Footer')
 $refreshButton = $window.FindName('RefreshButton')
 $scanButton = $window.FindName('ScanButton')
 $addButton = $window.FindName('AddButton')
+$updateAllButton = $window.FindName('UpdateAllButton')
 $script:cards = @()
 $script:updateProcess = $null
 $script:upgradeLines = @()
 $script:installedLines = @()
 $script:updatesReady = $false
+$script:checkError = ''
+$script:installProcess = $null
+$script:installQueue = New-Object 'System.Collections.Generic.Queue[object]'
+$script:installResults = @{}
+$script:installCurrent = $null
+$script:installTotal = 0
+$script:installDone = 0
+$script:batchSummary = ''
 
 function Brush($hex) { [System.Windows.Media.BrushConverter]::new().ConvertFromString($hex) }
 function Get-IconSource($path) {
@@ -299,7 +313,7 @@ function Update-StartupCheckbox($checkbox, [bool]$enabled) {
 function New-Card($item) {
     $meta = Get-Meta $item
     $outer = [System.Windows.Controls.Border]::new()
-    $outer.Width = 232; $outer.Height = 230
+    $outer.Width = 232; $outer.Height = 312
     $outer.Margin = '10'; $outer.Padding = '17'; $outer.CornerRadius = '18'
     $outer.Background = Brush '#1B2638'; $outer.BorderBrush = Brush '#34445E'
     $outer.BorderThickness = '1'; $outer.Tag = $item.Path
@@ -344,6 +358,10 @@ function New-Card($item) {
     $state = [System.Windows.Controls.TextBlock]::new(); $state.Text = 'Geschlossen'
     $state.FontSize = 12; $state.Foreground = Brush '#9EB0C6'; $state.Margin = '0,2,0,8'
     $stack.Children.Add($state) | Out-Null
+    $account = [System.Windows.Controls.TextBlock]::new(); $account.Text = 'Konto: nicht prüfbar'
+    $account.FontSize = 11; $account.Foreground = Brush '#9EB0C6'; $account.Margin = '0,-3,0,8'
+    $account.ToolTip = 'Der Hub erhält aktuell keinen bestätigten Anmeldestatus. Ein laufender Prozess oder gespeicherte Konten sind kein Nachweis.'
+    $stack.Children.Add($account) | Out-Null
     $badge = [System.Windows.Controls.Border]::new(); $badge.Background = Brush '#3B382A'
     $badge.CornerRadius = '9'; $badge.Padding = '9,5'; $badge.HorizontalAlignment = 'Left'
     $badgeText = [System.Windows.Controls.TextBlock]::new(); $badgeText.Text = 'Versionsprüfung läuft'
@@ -365,6 +383,25 @@ function New-Card($item) {
     $autoStart.Add_Unchecked({ param($sender,$e) Update-StartupCheckbox $sender $false })
     $actions.Children.Add($autoStart) | Out-Null
     $stack.Children.Add($actions) | Out-Null
+    $update = [System.Windows.Controls.Button]::new(); $update.Content = 'Aktualisieren'; $update.Tag = $item.Path
+    $update.Style = $window.Resources['TopButton']; $update.Padding = '10,3'
+    $update.Height = 29; $update.Margin = '0,9,0,0'; $update.IsEnabled = $false
+    $update.Background = Brush '#215B47'; $update.Foreground = Brush '#BEF1DB'
+    $update.BorderThickness = '0'; $update.Cursor = 'Hand'
+    $update.Add_Click({
+        param($sender,$e)
+        $card = @($script:cards | Where-Object Path -eq ([string]$sender.Tag)) | Select-Object -First 1
+        if (-not $card) { return }
+        if (-not $card.Meta.Package) {
+            try { Start-Process -FilePath $card.Path }
+            catch { $footer.Text = "Konnte $($card.Name) nicht öffnen: $($_.Exception.Message)" }
+        } else { Start-LauncherUpdates @($card) }
+    })
+    $stack.Children.Add($update) | Out-Null
+    $operation = [System.Windows.Controls.TextBlock]::new(); $operation.FontSize = 11
+    $operation.Foreground = Brush '#ADC0DA'; $operation.Margin = '0,6,0,0'
+    $operation.TextTrimming = 'CharacterEllipsis'
+    $stack.Children.Add($operation) | Out-Null
     $open.Add_Click({
         param($sender,$e)
         try { Start-Process -FilePath $sender.Tag }
@@ -427,7 +464,7 @@ function New-Card($item) {
         $e.Handled = $true
     })
     $cardsPanel.Children.Add($outer) | Out-Null
-    $script:cards += [pscustomobject]@{ Name=$item.Name; Path=$item.Path; Meta=$meta; Dot=$dot; State=$state; Badge=$badge; BadgeText=$badgeText }
+    $script:cards += [pscustomobject]@{ Name=$item.Name; Path=$item.Path; Meta=$meta; Dot=$dot; State=$state; Badge=$badge; BadgeText=$badgeText; UpdateButton=$update; Operation=$operation; CanUpdate=$false }
 }
 
 function Rebuild-Cards {
@@ -436,7 +473,7 @@ function Rebuild-Cards {
     foreach ($item in $script:entries) { New-Card $item }
     $totalCount.Text = "$($script:cards.Count) Launcher"
     Refresh-Processes
-    if ($script:updatesReady) { Apply-UpdateResults }
+    Apply-UpdateResults
 }
 
 function Refresh-Processes {
@@ -456,13 +493,33 @@ function Refresh-Processes {
 }
 
 function Start-UpdateCheck {
-    if ($script:updateProcess -and -not $script:updateProcess.HasExited) { return }
+    if ($script:updateProcess -or $script:installCurrent) { return }
     $script:updatesReady = $false
-    $footer.Text = 'Laufstatus wird regelmäßig aktualisiert · Versionen werden geprüft …'
-    if (Test-Path -LiteralPath $statusPath) { Remove-Item -LiteralPath $statusPath -Force }
+    $script:checkError = ''
+    $footer.Text = ($script:batchSummary + ' Versionen werden geprüft …').Trim()
+    try {
+        if (Test-Path -LiteralPath $statusPath) { Remove-Item -LiteralPath $statusPath -Force }
+        $script:updateProcess = Start-HubWorker 'Check' $statusPath
+    } catch {
+        $script:checkError = $_.Exception.Message; $script:updatesReady = $true
+        $footer.Text = ($script:batchSummary + ' Updateprüfung nicht verfügbar: ' + $script:checkError).Trim()
+    }
+    Apply-UpdateResults
+}
+
+function Start-HubWorker([string]$mode, [string]$outputPath, [string]$packageId) {
+    if (-not (Test-Path -LiteralPath $appData)) { New-Item -ItemType Directory -Path $appData -Force | Out-Null }
     $exe = Join-Path $env:WINDIR 'System32\WindowsPowerShell\v1.0\powershell.exe'
-    $arguments = "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$helperPath`" -OutputPath `"$statusPath`""
-    $script:updateProcess = Start-Process -FilePath $exe -ArgumentList $arguments -WindowStyle Hidden -PassThru
+    $arguments = "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$helperPath`" -Mode $mode -OutputPath `"$outputPath`""
+    if ($mode -eq 'Upgrade') {
+        Get-HubUpgradeArguments $packageId | Out-Null
+        $arguments += " -PackageId $packageId"
+    }
+    $start = [System.Diagnostics.ProcessStartInfo]::new()
+    $start.FileName = $exe; $start.Arguments = $arguments
+    $start.UseShellExecute = $false; $start.CreateNoWindow = $true
+    $start.WindowStyle = [System.Diagnostics.ProcessWindowStyle]::Hidden
+    [System.Diagnostics.Process]::Start($start)
 }
 
 function Get-ActualVersion($card) {
@@ -471,73 +528,135 @@ function Get-ActualVersion($card) {
     if ($card.Name -eq 'Rockstar Games Launcher') { $target = Join-Path (Split-Path $target) 'Launcher.exe' }
     if ($card.Name -eq 'Epic Games Launcher') { $target = $target -replace '\\Win32\\', '\Win64\' }
     if (-not (Test-Path -LiteralPath $target -PathType Leaf)) { return '' }
-    $version = (Get-Item -LiteralPath $target).VersionInfo.ProductVersion
-    if (-not $version) { $version = (Get-Item -LiteralPath $target).VersionInfo.FileVersion }
-    return ($version -replace ',\s*', '.' -replace '\s', '')
+    try {
+        $version = (Get-Item -LiteralPath $target).VersionInfo.ProductVersion
+        if (-not $version) { $version = (Get-Item -LiteralPath $target).VersionInfo.FileVersion }
+        return ($version -replace ',\s*', '.' -replace '\s', '')
+    } catch { return '' }
 }
 
 function Apply-UpdateResults {
     $hintCount = 0
     foreach ($card in $script:cards) {
-        $package = $card.Meta.Package
-        $line = if ($package) { @($script:installedLines | Where-Object { $_ -match [regex]::Escape($package) }) | Select-Object -First 1 } else { $null }
-        $upgrade = if ($package) { @($script:upgradeLines | Where-Object { $_ -match [regex]::Escape($package) }) | Select-Object -First 1 } else { $null }
-        if ($upgrade) {
-            $actual = Get-ActualVersion $card
-            $available = ''
-            if ($upgrade -match '\s(?<installed><?\s*\d+(?:\.\d+)+)\s+(?<available>\d+(?:\.\d+)+)\s+winget\s*$') {
-                $available = $Matches.available
-            }
-            if ($actual -match '^\d+(?:\.\d+)+$' -and $available -and ([version]$actual) -ge ([version]$available)) {
-                $card.Badge.Background = Brush '#1B473D'; $card.BadgeText.Foreground = Brush '#A0EFD1'
-                $card.BadgeText.Text = '✓  Programmdatei auf Stand'
-            } elseif ($actual -match '^\d+(?:\.\d+)+$' -and $available -and
-                      ([version]$actual).Major -eq ([version]$available).Major -and ([version]$actual) -lt ([version]$available)) {
-                $card.Badge.Background = Brush '#512A31'; $card.BadgeText.Foreground = Brush '#FFB8C0'
-                $card.BadgeText.Text = '●  Update bestätigt'
-                $hintCount++
-            } else {
-                $card.Badge.Background = Brush '#59422B'; $card.BadgeText.Foreground = Brush '#FFDBA3'
-                $card.BadgeText.Text = '●  WinGet-Hinweis, prüfen'
-                $hintCount++
-            }
-        } elseif ($line -and $line -notmatch '\bUnknown\b') {
+        $status = Get-HubPackageStatus -PackageId $card.Meta.Package -UpgradeLines $script:upgradeLines -InstalledLines $script:installedLines -ActualVersion (Get-ActualVersion $card)
+        $card.CanUpdate = $script:updatesReady -and -not $script:checkError -and $status.CanUpdate
+        $card.Badge.Background = Brush '#3B382A'; $card.BadgeText.Foreground = Brush '#FFD793'
+        $card.BadgeText.Text = $status.Text
+        if ($card.Meta.Package -and -not $script:updatesReady) { $card.BadgeText.Text = 'Versionsprüfung läuft' }
+        elseif ($card.Meta.Package -and $script:checkError) { $card.BadgeText.Text = 'Version nicht prüfbar' }
+        elseif ($status.Tone -eq 'Current') {
             $card.Badge.Background = Brush '#28423D'; $card.BadgeText.Foreground = Brush '#B7E5D4'
-            $card.BadgeText.Text = '✓  Kein Update gemeldet'
-        } else {
-            $card.Badge.Background = Brush '#3B382A'; $card.BadgeText.Foreground = Brush '#FFD793'
-            $card.BadgeText.Text = '●  Version ungeprüft'
+        }
+        $card.BadgeText.TextTrimming = 'CharacterEllipsis'
+        $card.BadgeText.ToolTip = $card.BadgeText.Text
+        if ($card.CanUpdate) { $hintCount++ }
+        $card.UpdateButton.Content = if ($card.Meta.Package) { 'Aktualisieren' } else { 'Im Launcher prüfen' }
+        $card.UpdateButton.IsEnabled = -not $script:installCurrent -and ($card.CanUpdate -or -not $card.Meta.Package)
+        $card.UpdateButton.ToolTip = if ($card.Meta.Package) { 'Installiert das erkannte WinGet-Update. Windows kann um Berechtigung bitten. Quell- und Paketbedingungen werden bestätigt.' } else { 'Keine direkte Update-Unterstützung: Launcher öffnen und dort prüfen.' }
+        $card.Operation.Text = ''; $card.Operation.ToolTip = $null
+        if ($card.Meta.Package -and $script:installResults.ContainsKey($card.Meta.Package)) {
+            $last = $script:installResults[$card.Meta.Package]
+            $card.Operation.Text = $last.Message
+            $card.Operation.Foreground = if ($last.State -eq 'Failed') { Brush '#FFB8C0' } else { Brush '#A0EFD1' }
+            $card.Operation.ToolTip = $last.Message + "`nDetails: " + (Join-Path $appData 'last-update-log.json')
+        }
+        if ($script:installCurrent -and $card.Meta.Package -eq $script:installCurrent.Package) {
+            $card.Operation.Text = 'Wird aktualisiert …'; $card.Operation.Foreground = Brush '#FFDBA3'
+        } elseif (@($script:installQueue.ToArray() | Where-Object Package -eq $card.Meta.Package).Count -gt 0) {
+            $card.Operation.Text = 'Wartet auf Aktualisierung …'; $card.Operation.Foreground = Brush '#FFDBA3'
         }
     }
-    $updateCount.Text = "$hintCount Versionshinweise"
-    $footer.Text = "Laufstatus wird regelmäßig aktualisiert · Versionsprüfung: $(Get-Date -Format 'HH:mm') · Hinweise bitte im Launcher bestätigen"
-    $script:updatesReady = $true
+    $updateCount.Text = if (-not $script:updatesReady) { 'Updates werden geprüft' } elseif ($script:checkError) { 'Prüfung nicht verfügbar' } else { "$hintCount Updates verfügbar" }
+    $updateAllButton.IsEnabled = $hintCount -gt 0 -and -not $script:installCurrent -and -not $script:updateProcess
+    $refreshButton.IsEnabled = -not $script:installCurrent -and -not $script:updateProcess
+}
+
+function Start-LauncherUpdates([object[]]$selectedCards) {
+    if ($script:installCurrent -or $script:updateProcess -or -not $script:updatesReady -or $script:checkError) { return }
+    $selected = @($selectedCards | Where-Object CanUpdate | Group-Object { $_.Meta.Package } | ForEach-Object { $_.Group[0] })
+    if (-not $selected.Count) { return }
+    $script:installResults = @{}; $script:batchSummary = ''
+    $script:installTotal = $selected.Count; $script:installDone = 0
+    foreach ($card in $selected) {
+        $script:installQueue.Enqueue([pscustomobject]@{ Name=$card.Name; Package=$card.Meta.Package })
+    }
+    Start-NextLauncherUpdate
+}
+
+function Save-InstallResult($result) {
+    $script:installResults[$script:installCurrent.Package] = [pscustomobject]@{
+        Name=$script:installCurrent.Name; PackageId=$script:installCurrent.Package
+        State=$result.State; Message=$result.Message; Output=$result.Output; CheckedAt=(Get-Date).ToString('o')
+    }
+    try {
+        @($script:installResults.Values) | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $appData 'last-update-log.json') -Encoding UTF8
+    } catch { $script:installResults[$script:installCurrent.Package].Message += ' · Protokoll nicht speicherbar' }
+}
+
+function Start-NextLauncherUpdate {
+    $script:installCurrent = $null
+    while ($script:installQueue.Count -gt 0) {
+        $script:installCurrent = $script:installQueue.Dequeue()
+        try {
+            if (Test-Path -LiteralPath $installPath) { Remove-Item -LiteralPath $installPath -Force }
+            $script:installProcess = Start-HubWorker 'Upgrade' $installPath $script:installCurrent.Package
+            $footer.Text = "Update $($script:installDone + 1)/$($script:installTotal): $($script:installCurrent.Name) · Bitte warten; Windows kann eine Berechtigung anfordern."
+            Apply-UpdateResults
+            return
+        } catch {
+            Save-InstallResult ([pscustomobject]@{ State='Failed'; Message=$_.Exception.Message; Output='' })
+            $script:installDone++
+        }
+    }
+    $script:installCurrent = $null
+    $results = @($script:installResults.Values)
+    $ok = @($results | Where-Object State -eq 'Succeeded').Count
+    $failed = @($results | Where-Object State -eq 'Failed').Count
+    $unchanged = @($results | Where-Object State -eq 'Unchanged').Count
+    $script:batchSummary = "Updates beendet: $ok abgeschlossen, $unchanged ohne Änderung, $failed fehlgeschlagen."
+    Start-UpdateCheck
+}
+
+function Read-HubWorkerResult([string]$path, [string]$mode) {
+    if (-not (Test-Path -LiteralPath $path)) { throw 'Der Update-Helfer hat kein Ergebnis geliefert.' }
+    $result = Get-Content -LiteralPath $path -Raw -Encoding UTF8 | ConvertFrom-Json
+    if ($result.Mode -ne $mode -or $result.State -notin @('Succeeded','Unchanged','Failed')) {
+        throw 'Ungültiges Ergebnis des Update-Helfers.'
+    }
+    return $result
 }
 
 $timer = [System.Windows.Threading.DispatcherTimer]::new(); $timer.Interval = [TimeSpan]::FromSeconds(3)
 $timer.Add_Tick({
     Refresh-Processes
-    if ($script:updateProcess -and $script:updateProcess.HasExited -and -not $script:updatesReady) {
-        $result = if (Test-Path -LiteralPath $statusPath) { Get-Content -LiteralPath $statusPath -Raw | ConvertFrom-Json } else { $null }
-        $script:updateProcess.Dispose()
-        $script:updateProcess = $null
-        if ($result -and -not $result.Error) {
+    if ($script:installProcess -and $script:installProcess.HasExited) {
+        try {
+            $result = Read-HubWorkerResult $installPath 'Upgrade'
+            if ($result.PackageId -ne $script:installCurrent.Package) { throw 'Falsche Paket-ID im Ergebnis.' }
+        } catch { $result = [pscustomobject]@{ State='Failed'; Message=$_.Exception.Message; Output='' } }
+        $script:installProcess.Dispose(); $script:installProcess = $null
+        Save-InstallResult $result
+        $script:installDone++
+        Start-NextLauncherUpdate
+    }
+    if ($script:updateProcess -and $script:updateProcess.HasExited) {
+        try {
+            $result = Read-HubWorkerResult $statusPath 'Check'
+            if ($result.State -ne 'Succeeded' -or $result.Error) { throw $result.Error }
             $script:upgradeLines = @($result.Upgrade -split "`r?`n")
             $script:installedLines = @($result.Installed -split "`r?`n")
-            Apply-UpdateResults
-        } else {
-            foreach ($card in $script:cards) {
-                $card.Badge.Background = Brush '#3B382A'
-                $card.BadgeText.Foreground = Brush '#FFD793'
-                $card.BadgeText.Text = '●  Version nicht prüfbar'
-            }
-            $updateCount.Text = 'Prüfung nicht verfügbar'
-            $footer.Text = 'Laufstatus wird regelmäßig aktualisiert · Updateprüfung fehlgeschlagen'
-            $script:updatesReady = $true
+            $footer.Text = ($script:batchSummary + " Prüfung: $(Get-Date -Format 'HH:mm') · Updates lassen sich einzeln oder gemeinsam starten.").Trim()
+        } catch {
+            $script:checkError = $_.Exception.Message
+            $footer.Text = ($script:batchSummary + ' Updateprüfung nicht verfügbar: ' + $script:checkError).Trim()
+        } finally {
+            $script:updateProcess.Dispose(); $script:updateProcess = $null
+            $script:updatesReady = $true; Apply-UpdateResults
         }
     }
 })
-$refreshButton.Add_Click({ Refresh-Processes; Start-UpdateCheck })
+$refreshButton.Add_Click({ $script:batchSummary = ''; Refresh-Processes; Start-UpdateCheck })
+$updateAllButton.Add_Click({ Start-LauncherUpdates @($script:cards) })
 $scanButton.Add_Click({
     $added = Add-Detected
     Rebuild-Cards
@@ -559,6 +678,12 @@ $addButton.Add_Click({
     }
 })
 $window.Add_Closing({
+    param($sender,$e)
+    if ($script:installCurrent) {
+        $e.Cancel = $true
+        [System.Windows.MessageBox]::Show('Bitte warte, bis die laufenden Updates abgeschlossen sind.', 'Launcher Hub') | Out-Null
+        return
+    }
     $bounds = if ($window.WindowState -eq 'Normal') { $window } else { $window.RestoreBounds }
     $script:windowSettings = [pscustomobject]@{
         Width=[math]::Round($bounds.Width); Height=[math]::Round($bounds.Height)
@@ -570,6 +695,9 @@ $window.Add_Closing({
 $window.Add_Closed({
     $timer.Stop()
     if ($script:updateProcess) { $script:updateProcess.Dispose() }
+    foreach ($path in @($statusPath, $installPath)) {
+        Remove-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue
+    }
 })
 Rebuild-Cards; Start-UpdateCheck; $timer.Start()
 $window.ShowDialog() | Out-Null
