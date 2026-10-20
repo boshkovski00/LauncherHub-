@@ -159,62 +159,13 @@ if ($Check) {
 if ($Scan) { Find-Launchers | Format-Table -AutoSize; exit 0 }
 
 Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase, System.Drawing
-$xaml = @'
-<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
-        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="Launcher Hub" Width="1160" Height="800" MinWidth="760" MinHeight="520"
-        WindowStartupLocation="CenterScreen" Background="#0B101A" Foreground="#F5F7FC"
-        FontFamily="Segoe UI" FontSize="14">
-  <Window.Resources>
-    <Style TargetType="Button" x:Key="TopButton">
-      <Setter Property="Background" Value="#26344A"/>
-      <Setter Property="Foreground" Value="#EFF6FF"/>
-      <Setter Property="BorderThickness" Value="0"/>
-      <Setter Property="Padding" Value="18,10"/>
-      <Setter Property="Cursor" Value="Hand"/>
-      <Setter Property="Template"><Setter.Value><ControlTemplate TargetType="Button">
-        <Border Background="{TemplateBinding Background}" CornerRadius="11" Padding="{TemplateBinding Padding}">
-          <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
-        </Border>
-      </ControlTemplate></Setter.Value></Setter>
-      <Style.Triggers><Trigger Property="IsEnabled" Value="False"><Setter Property="Opacity" Value="0.45"/></Trigger></Style.Triggers>
-    </Style>
-  </Window.Resources>
-  <Grid Background="#0B101A">
-    <Grid.RowDefinitions><RowDefinition Height="210"/><RowDefinition Height="*"/><RowDefinition Height="58"/></Grid.RowDefinitions>
-    <Border Grid.Row="0" Background="#142039" BorderBrush="#334F70" BorderThickness="0,0,0,1">
-      <Grid Margin="30,14,30,10">
-        <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
-        <StackPanel>
-          <StackPanel Orientation="Horizontal"><TextBlock Text="LAUNCHER HUB" Foreground="#74D8FF" FontWeight="Bold" FontSize="12"/><TextBlock Text="  ·  by Teo" Foreground="#91A9C6" FontSize="12"/></StackPanel>
-          <TextBlock Text="Alles an einem Ort." FontSize="27" FontWeight="SemiBold" Margin="0,1,0,1"/>
-          <TextBlock Text="Launcher starten, verwalten und ihren Status prüfen." Foreground="#ADC0DA" FontSize="12"/>
-          <StackPanel Orientation="Horizontal" Margin="0,11,0,0">
-            <Border Background="#24435B" CornerRadius="14" Padding="12,6" Margin="0,0,9,0"><TextBlock x:Name="TotalCount" Text="0 Launcher" Foreground="#CDEAFF"/></Border>
-            <Border Background="#164834" CornerRadius="14" Padding="12,6" Margin="0,0,9,0"><TextBlock x:Name="RunningCount" Text="0 aktiv" Foreground="#97F5BE"/></Border>
-            <Border Background="#5A4227" CornerRadius="14" Padding="12,6"><TextBlock x:Name="UpdateCount" Text="Updates werden geprüft" Foreground="#FFDBA3"/></Border>
-          </StackPanel>
-        </StackPanel>
-        <WrapPanel Grid.Row="1" Margin="0,14,0,0">
-          <Button x:Name="ScanButton" Content="Auto-Erkennung" Style="{StaticResource TopButton}" Margin="0,0,9,0"/>
-          <Button x:Name="AddButton" Content="+ Hinzufügen" Style="{StaticResource TopButton}" Margin="0,0,9,0"/>
-          <Button x:Name="RefreshButton" Content="↻ Prüfen" Style="{StaticResource TopButton}" Margin="0,0,9,0"/>
-          <Button x:Name="UpdateAllButton" Content="Alle Updates starten" Style="{StaticResource TopButton}" Background="#215B47" IsEnabled="False" ToolTip="Aktualisiert erkannte Programme im Hub nacheinander. Windows kann um Berechtigung bitten."/>
-        </WrapPanel>
-      </Grid>
-    </Border>
-    <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" Padding="20,16,20,16">
-      <WrapPanel x:Name="Cards" ItemWidth="252" ItemHeight="332"/>
-    </ScrollViewer>
-    <Border Grid.Row="2" Background="#111A29" BorderBrush="#26354C" BorderThickness="0,1,0,0">
-      <TextBlock x:Name="Footer" Text="Laufstatus wird regelmäßig aktualisiert · Versionsprüfung läuft" Foreground="#8CA0BA" TextWrapping="Wrap" VerticalAlignment="Center" Margin="32,0"/>
-    </Border>
-  </Grid>
-</Window>
-'@
+$xaml = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'LauncherHub.xaml') -Raw -Encoding UTF8
+$cardXaml = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'LauncherHub.Card.xaml') -Raw -Encoding UTF8
 
 $reader = New-Object System.Xml.XmlNodeReader([xml]$xaml)
 $window = [Windows.Markup.XamlReader]::Load($reader)
+$iconPath = Join-Path $PSScriptRoot 'LauncherHub.ico'
+if (Test-Path -LiteralPath $iconPath) { $window.Icon = [System.Windows.Media.Imaging.BitmapFrame]::Create([uri]$iconPath) }
 if ($script:windowSettings) {
     $view = $script:windowSettings
     if ($view.Width -ge 760 -and $view.Width -le 5000 -and $view.Height -ge 520 -and $view.Height -le 3000) {
@@ -256,25 +207,155 @@ $script:installCurrent = $null
 $script:installTotal = 0
 $script:installDone = 0
 $script:batchSummary = ''
+$script:activeView = 'all'
 
 function Brush($hex) { [System.Windows.Media.BrushConverter]::new().ConvertFromString($hex) }
+
+function Connect-HubUI {
+    $script:cardsScroll = $window.FindName('CardsScroll')
+    $script:footerState = $window.FindName('FooterState')
+    $script:allTab = $window.FindName('AllTab')
+    $script:updatesTab = $window.FindName('UpdatesTab')
+    $script:updateNavCount = $window.FindName('UpdateNavCount')
+    $script:emptyState = $window.FindName('EmptyState')
+    $script:emptyTitle = $window.FindName('EmptyTitle')
+    $script:emptyDescription = $window.FindName('EmptyDescription')
+    $script:scanButton = $window.FindName('ScanButton')
+    $allTab.Add_Checked({ $script:activeView = 'all'; Update-HubView })
+    $updatesTab.Add_Checked({ $script:activeView = 'updates'; Update-HubView })
+    $cardsScroll.Add_SizeChanged({ Update-HubLayout })
+    $cardsScroll.Add_ScrollChanged({ param($sender,$e) if ($e.ViewportWidthChange -ne 0) { Update-HubLayout } })
+    $window.Add_SizeChanged({ Update-HubLayout })
+    $window.FindName('MinimizeButton').Add_Click({ $window.WindowState = 'Minimized' })
+    $window.FindName('MaximizeButton').Add_Click({
+        $window.WindowState = if ($window.WindowState -eq 'Maximized') { 'Normal' } else { 'Maximized' }
+    })
+    $window.FindName('CloseButton').Add_Click({ $window.Close() })
+    $window.Add_StateChanged({
+        $window.FindName('MaximizeButton').Content = if ($window.WindowState -eq 'Maximized') { [char]0xE923 } else { [char]0xE922 }
+    })
+    $settings = $window.FindName('SettingsButton')
+    $menu = [System.Windows.Controls.ContextMenu]::new(); $menu.Style = $window.Resources['HubContextMenu']
+    $detect = [System.Windows.Controls.MenuItem]::new(); $detect.Header = 'Launcher automatisch erkennen'; $detect.Style = $window.Resources['HubMenuItem']
+    $detect.Add_Click({ Invoke-HubScan })
+    $menu.Items.Add($detect) | Out-Null
+    $log = [System.Windows.Controls.MenuItem]::new(); $log.Header = 'Letztes Update-Protokoll öffnen'; $log.Style = $window.Resources['HubMenuItem']
+    $log.Add_Click({
+        $path = Join-Path $appData 'last-update-log.json'
+        if (Test-Path -LiteralPath $path) {
+            try { Start-Process -FilePath (Join-Path $env:WINDIR 'System32\notepad.exe') -ArgumentList ('"' + $path + '"') }
+            catch { $footer.Text = 'Das Update-Protokoll konnte nicht geöffnet werden.' }
+        } else { $footer.Text = 'Noch kein Update-Protokoll vorhanden.' }
+    })
+    $menu.Items.Add($log) | Out-Null
+    $settings.ContextMenu = $menu
+    $settings.Add_Click({ param($sender,$e) $sender.ContextMenu.PlacementTarget = $sender; $sender.ContextMenu.IsOpen = $true })
+    Update-HubLayout
+}
+
+function Update-HubLayout([double]$width = 0) {
+    if ($width -le 0) {
+        $width = $window.FindName('RootGrid').ActualWidth
+        if ($width -le 0) { $width = $window.Width }
+    }
+    $compact = $width -lt 1080
+    $actions = $window.FindName('HeaderActions'); $summary = $window.FindName('Summary')
+    if ($compact) {
+        [System.Windows.Controls.Grid]::SetRow($actions, 1); [System.Windows.Controls.Grid]::SetColumn($actions, 0)
+        [System.Windows.Controls.Grid]::SetColumnSpan($actions, 2)
+        [System.Windows.Controls.Grid]::SetRow($summary, 2)
+        $actions.Margin = '0,16,0,0'; $actions.HorizontalAlignment = 'Left'
+    } else {
+        [System.Windows.Controls.Grid]::SetRow($actions, 0); [System.Windows.Controls.Grid]::SetColumn($actions, 1)
+        [System.Windows.Controls.Grid]::SetColumnSpan($actions, 1)
+        [System.Windows.Controls.Grid]::SetRow($summary, 1)
+        $actions.Margin = '0'; $actions.HorizontalAlignment = 'Right'
+    }
+    $window.FindName('Byline').Visibility = if ($width -lt 1080) { 'Collapsed' } else { 'Visible' }
+    $window.FindName('SettingsLabel').Visibility = if ($width -lt 1100) { 'Collapsed' } else { 'Visible' }
+    $window.FindName('AllTabLabel').Text = if ($width -lt 900) { 'Launcher' } else { 'Meine Launcher' }
+    $footerState.Visibility = if ($width -lt 980) { 'Collapsed' } else { 'Visible' }
+    $space = $cardsScroll.ViewportWidth
+    if ($space -le 0) { $space = $width - 54 }
+    $columns = if ($space -ge 920) { 2 } else { 1 }
+    $itemWidth = [math]::Floor($space / $columns)
+    if ([math]::Abs($cardsPanel.ItemWidth - $itemWidth) -gt 0.5) { $cardsPanel.ItemWidth = $itemWidth }
+    foreach ($card in $script:cards) { $card.Outer.Width = [math]::Max(320, $itemWidth - 18) }
+}
+
+function Update-HubView {
+    $visible = 0
+    foreach ($card in $script:cards) {
+        $show = $script:activeView -ne 'updates' -or $card.CanUpdate -or
+            ($card.Meta.Package -and $script:installResults.ContainsKey($card.Meta.Package))
+        $card.Outer.Visibility = if ($show) { 'Visible' } else { 'Collapsed' }
+        if ($show) { $visible++ }
+    }
+    $emptyState.Visibility = if ($visible -eq 0) { 'Visible' } else { 'Collapsed' }
+    if ($script:activeView -eq 'updates') {
+        $emptyTitle.Text = if (-not $script:updatesReady) { 'Updates werden geprüft …' } elseif ($script:checkError) { 'Prüfung nicht verfügbar' } else { 'Keine offenen Updates.' }
+        $emptyDescription.Text = if ($script:checkError) { 'Starte die Prüfung erneut. Programme ohne direkte Unterstützung prüfst du im jeweiligen Launcher.' } else { 'Hier erscheinen erkannte Updates und die Ergebnisse des letzten Durchlaufs.' }
+        $scanButton.Visibility = 'Collapsed'
+    } else {
+        $emptyTitle.Text = 'Dein Hub wartet auf dich.'
+        $emptyDescription.Text = 'Erkenne installierte Launcher automatisch oder füge ein Programm hinzu.'
+        $scanButton.Visibility = 'Visible'
+    }
+    Update-HubLayout
+}
+
+function Invoke-HubScan {
+    $added = Add-Detected
+    $allTab.IsChecked = $true
+    Rebuild-Cards
+    $footer.Text = if ($added) { "$added Launcher automatisch hinzugefügt." } else { 'Keine weiteren bekannten Launcher in Desktop und Startmenü gefunden.' }
+}
+
 function Get-IconSource($path) {
+    $handle = [IntPtr]::Zero
+    $managedIcon = $null
     try {
-        $icon = $null
+        if (-not $script:iconCache) { $script:iconCache = @{} }
+        if ($script:iconCache.ContainsKey($path)) { return $script:iconCache[$path] }
+        $target = $path; $index = 0
         if ([System.IO.Path]::GetExtension($path) -eq '.lnk') {
             $shell = New-Object -ComObject WScript.Shell
-            $location = $shell.CreateShortcut($path).IconLocation -replace ',\d+$', ''
-            if ($location -and (Test-Path -LiteralPath $location -PathType Leaf) -and [System.IO.Path]::GetExtension($location) -eq '.ico') {
-                $icon = [System.Drawing.Icon]::new($location)
+            $shortcut = $shell.CreateShortcut($path)
+            $target = $shortcut.TargetPath
+            $location = [Environment]::ExpandEnvironmentVariables([string]$shortcut.IconLocation)
+            if ($location -match '^(?<file>.+?)(?:,(?<index>-?\d+))?$') {
+                $file = $Matches.file.Trim('"'); $iconIndex = [int]$Matches.index
+                if (Test-Path -LiteralPath $file -PathType Leaf) { $target = $file; $index = $iconIndex }
             }
         }
-        if (-not $icon) { $icon = [System.Drawing.Icon]::ExtractAssociatedIcon($path) }
-        if (-not $icon) { return $null }
-        $source = [System.Windows.Interop.Imaging]::CreateBitmapSourceFromHIcon(
-            $icon.Handle, [System.Windows.Int32Rect]::Empty,
-            [System.Windows.Media.Imaging.BitmapSizeOptions]::FromWidthAndHeight(60, 60))
-        $source.Freeze(); $icon.Dispose(); return $source
-    } catch { return $null }
+        if (-not $target -or -not (Test-Path -LiteralPath $target -PathType Leaf)) { return $null }
+        if (-not ('LauncherHubIconReader' -as [type])) {
+            Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+public static class LauncherHubIconReader {
+    [DllImport("shell32.dll", CharSet=CharSet.Unicode, ExactSpelling=true)]
+    public static extern int SHDefExtractIconW(string file, int index, uint flags, out IntPtr largeIcon, IntPtr smallIcon, uint size);
+    [DllImport("user32.dll")]
+    public static extern bool DestroyIcon(IntPtr icon);
+}
+'@
+        }
+        $code = [LauncherHubIconReader]::SHDefExtractIconW($target, $index, 0, [ref]$handle, [IntPtr]::Zero, 64)
+        if ($code -eq 0 -and $handle -ne [IntPtr]::Zero) {
+            $source = [System.Windows.Interop.Imaging]::CreateBitmapSourceFromHIcon($handle, [System.Windows.Int32Rect]::Empty,
+                [System.Windows.Media.Imaging.BitmapSizeOptions]::FromEmptyOptions())
+        } else {
+            $managedIcon = [System.Drawing.Icon]::ExtractAssociatedIcon($target)
+            if (-not $managedIcon) { return $null }
+            $source = [System.Windows.Interop.Imaging]::CreateBitmapSourceFromHIcon($managedIcon.Handle, [System.Windows.Int32Rect]::Empty,
+                [System.Windows.Media.Imaging.BitmapSizeOptions]::FromEmptyOptions())
+        }
+        $source.Freeze(); $script:iconCache[$path] = $source; return $source
+    } catch { return $null } finally {
+        if ($handle -ne [IntPtr]::Zero) { [LauncherHubIconReader]::DestroyIcon($handle) | Out-Null }
+        if ($managedIcon) { $managedIcon.Dispose() }
+    }
 }
 
 function Get-Meta($entry) {
@@ -312,32 +393,38 @@ function Update-StartupCheckbox($checkbox, [bool]$enabled) {
 
 function New-Card($item) {
     $meta = Get-Meta $item
-    $outer = [System.Windows.Controls.Border]::new()
-    $outer.Width = 232; $outer.Height = 312
-    $outer.Margin = '10'; $outer.Padding = '17'; $outer.CornerRadius = '18'
-    $outer.Background = Brush '#1B2638'; $outer.BorderBrush = Brush '#34445E'
-    $outer.BorderThickness = '1'; $outer.Tag = $item.Path
-    $outer.AllowDrop = $true
+    $outer = [Windows.Markup.XamlReader]::Load([System.Xml.XmlNodeReader]::new([xml]$cardXaml))
+    $outer.Tag = $item.Path
+    $outer.Width = [math]::Max(320, $cardsPanel.ItemWidth - 18)
     $outer.ToolTip = 'Zum Sortieren ziehen und auf einer anderen Kachel ablegen'
-    $stack = [System.Windows.Controls.StackPanel]::new(); $outer.Child = $stack
-    $top = [System.Windows.Controls.Grid]::new(); $top.Height = 54
-    $top.ColumnDefinitions.Add([System.Windows.Controls.ColumnDefinition]::new())
-    $col = [System.Windows.Controls.ColumnDefinition]::new(); $col.Width = 'Auto'; $top.ColumnDefinitions.Add($col)
-    $col2 = [System.Windows.Controls.ColumnDefinition]::new(); $col2.Width = 'Auto'; $top.ColumnDefinitions.Add($col2)
-    $stack.Children.Add($top) | Out-Null
-    $image = [System.Windows.Controls.Image]::new(); $image.Source = Get-IconSource $item.Path
-    $image.Width = 52; $image.Height = 52; $image.HorizontalAlignment = 'Left'
-    $top.Children.Add($image) | Out-Null
-    $dot = [System.Windows.Shapes.Ellipse]::new(); $dot.Width = 11; $dot.Height = 11
-    $dot.Fill = Brush '#687A91'; $dot.VerticalAlignment = 'Top'; $dot.Margin = '0,6,3,0'
-    [System.Windows.Controls.Grid]::SetColumn($dot, 1); $top.Children.Add($dot) | Out-Null
-    $remove = [System.Windows.Controls.Button]::new(); $remove.Content = '×'; $remove.Tag = $item.Path
-    $remove.Width = 21; $remove.Height = 21; $remove.Margin = '12,-11,-9,0'
-    $remove.VerticalAlignment = 'Top'; $remove.HorizontalAlignment = 'Right'
-    $remove.Background = Brush '#34445C'; $remove.Foreground = Brush '#DCE8FA'
-    $remove.BorderThickness = '0'; $remove.Cursor = 'Hand'
-    $remove.ToolTip = 'Nur aus dem Hub entfernen'
-    [System.Windows.Controls.Grid]::SetColumn($remove, 2); $top.Children.Add($remove) | Out-Null
+    $image = $outer.FindName('LauncherIcon'); $image.Source = Get-IconSource $item.Path
+    $fallback = $outer.FindName('IconFallback')
+    $fallback.Text = ([string]$item.Name).Substring(0, 1).ToUpperInvariant()
+    $fallback.Visibility = if ($image.Source) { 'Collapsed' } else { 'Visible' }
+    $name = $outer.FindName('LauncherName'); $name.Text = $item.Name; $name.ToolTip = $item.Name
+    $dot = $outer.FindName('RunningDot'); $state = $outer.FindName('RunningState')
+    $badge = $outer.FindName('StatusBadge'); $badgeText = $outer.FindName('UpdateStatus')
+    $statusDot = $outer.FindName('UpdateDot')
+    $open = $outer.FindName('OpenButton'); $open.Tag = $item.Path
+    $open.Style = $window.Resources['PrimaryButton']; $open.Padding = '10,4'
+    [System.Windows.Automation.AutomationProperties]::SetName($open, "$($item.Name) öffnen")
+    $update = $outer.FindName('UpdateButton'); $update.Tag = $item.Path
+    $update.Style = $window.Resources['TopButton']; $update.Padding = '7,4'
+    $update.Background = Brush '#131F28'; $update.BorderBrush = Brush '#496B80'
+    [System.Windows.Automation.AutomationProperties]::SetName($update, "$($item.Name) aktualisieren")
+    $autoStart = $outer.FindName('AutoStart'); $autoStart.Tag = $item.Path
+    $autoStart.Style = $window.Resources['HubToggle']
+    $autoStart.IsChecked = Test-Path -LiteralPath (Get-StartupPath $item) -PathType Leaf
+    $autoStart.Add_Checked({ param($sender,$e) Update-StartupCheckbox $sender $true })
+    $autoStart.Add_Unchecked({ param($sender,$e) Update-StartupCheckbox $sender $false })
+    $operation = $outer.FindName('Operation')
+    $menuButton = $outer.FindName('MenuButton'); $menuButton.Style = $window.Resources['TopButton']; $menuButton.Padding = '4,0'
+    [System.Windows.Automation.AutomationProperties]::SetName($menuButton, "$($item.Name) verwalten")
+    $menu = [System.Windows.Controls.ContextMenu]::new(); $menu.Style = $window.Resources['HubContextMenu']
+    $remove = [System.Windows.Controls.MenuItem]::new(); $remove.Header = 'Aus dem Hub entfernen'; $remove.Tag = $item.Path
+    $remove.Style = $window.Resources['HubMenuItem']; $menu.Items.Add($remove) | Out-Null
+    $menuButton.ContextMenu = $menu
+    $menuButton.Add_Click({ param($sender,$e) $sender.ContextMenu.PlacementTarget = $sender; $sender.ContextMenu.IsOpen = $true })
     $remove.Add_Click({
         param($sender,$e)
         $path = [string]$sender.Tag
@@ -351,43 +438,6 @@ function New-Card($item) {
             $footer.Text = "$($entry.Name) wurde nur aus dem Hub entfernt."
         }
     })
-    $name = [System.Windows.Controls.TextBlock]::new(); $name.Text = $item.Name
-    $name.FontSize = 17; $name.FontWeight = 'SemiBold'; $name.Foreground = Brush '#F5F8FF'
-    $name.TextTrimming = 'CharacterEllipsis'; $name.Margin = '0,6,0,0'
-    $stack.Children.Add($name) | Out-Null
-    $state = [System.Windows.Controls.TextBlock]::new(); $state.Text = 'Geschlossen'
-    $state.FontSize = 12; $state.Foreground = Brush '#9EB0C6'; $state.Margin = '0,2,0,8'
-    $stack.Children.Add($state) | Out-Null
-    $account = [System.Windows.Controls.TextBlock]::new(); $account.Text = 'Konto: nicht prüfbar'
-    $account.FontSize = 11; $account.Foreground = Brush '#9EB0C6'; $account.Margin = '0,-3,0,8'
-    $account.ToolTip = 'Der Hub erhält aktuell keinen bestätigten Anmeldestatus. Ein laufender Prozess oder gespeicherte Konten sind kein Nachweis.'
-    $stack.Children.Add($account) | Out-Null
-    $badge = [System.Windows.Controls.Border]::new(); $badge.Background = Brush '#3B382A'
-    $badge.CornerRadius = '9'; $badge.Padding = '9,5'; $badge.HorizontalAlignment = 'Left'
-    $badgeText = [System.Windows.Controls.TextBlock]::new(); $badgeText.Text = 'Versionsprüfung läuft'
-    $badgeText.FontSize = 11; $badgeText.Foreground = Brush '#FFD793'; $badge.Child = $badgeText
-    $stack.Children.Add($badge) | Out-Null
-    $open = [System.Windows.Controls.Button]::new(); $open.Content = 'ÖFFNEN  →'; $open.Tag = $item.Path
-    $open.Height = 29; $open.HorizontalAlignment = 'Left'; $open.Margin = '0,0,12,0'
-    $open.Padding = '10,3'; $open.Background = Brush '#2B4963'; $open.Foreground = Brush '#C7ECFF'
-    $open.BorderThickness = '0'; $open.Cursor = 'Hand'
-    $actions = [System.Windows.Controls.StackPanel]::new(); $actions.Orientation = 'Horizontal'; $actions.Margin = '0,11,0,0'
-    $actions.Children.Add($open) | Out-Null
-    $autoStart = [System.Windows.Controls.CheckBox]::new()
-    $autoStart.Content = 'Autostart'; $autoStart.Tag = $item.Path
-    $autoStart.FontSize = 12; $autoStart.Foreground = Brush '#C7D9ED'
-    $autoStart.VerticalAlignment = 'Center'; $autoStart.Cursor = 'Hand'
-    $autoStart.ToolTip = 'Mit Windows starten (über Launcher Hub)'
-    $autoStart.IsChecked = Test-Path -LiteralPath (Get-StartupPath $item) -PathType Leaf
-    $autoStart.Add_Checked({ param($sender,$e) Update-StartupCheckbox $sender $true })
-    $autoStart.Add_Unchecked({ param($sender,$e) Update-StartupCheckbox $sender $false })
-    $actions.Children.Add($autoStart) | Out-Null
-    $stack.Children.Add($actions) | Out-Null
-    $update = [System.Windows.Controls.Button]::new(); $update.Content = 'Aktualisieren'; $update.Tag = $item.Path
-    $update.Style = $window.Resources['TopButton']; $update.Padding = '10,3'
-    $update.Height = 29; $update.Margin = '0,9,0,0'; $update.IsEnabled = $false
-    $update.Background = Brush '#215B47'; $update.Foreground = Brush '#BEF1DB'
-    $update.BorderThickness = '0'; $update.Cursor = 'Hand'
     $update.Add_Click({
         param($sender,$e)
         $card = @($script:cards | Where-Object Path -eq ([string]$sender.Tag)) | Select-Object -First 1
@@ -397,18 +447,13 @@ function New-Card($item) {
             catch { $footer.Text = "Konnte $($card.Name) nicht öffnen: $($_.Exception.Message)" }
         } else { Start-LauncherUpdates @($card) }
     })
-    $stack.Children.Add($update) | Out-Null
-    $operation = [System.Windows.Controls.TextBlock]::new(); $operation.FontSize = 11
-    $operation.Foreground = Brush '#ADC0DA'; $operation.Margin = '0,6,0,0'
-    $operation.TextTrimming = 'CharacterEllipsis'
-    $stack.Children.Add($operation) | Out-Null
     $open.Add_Click({
         param($sender,$e)
         try { Start-Process -FilePath $sender.Tag }
         catch { [System.Windows.MessageBox]::Show("Konnte den Launcher nicht öffnen: $($_.Exception.Message)", 'Launcher Hub') | Out-Null }
     })
-    $outer.Add_MouseEnter({ param($sender,$e) $sender.Background = Brush '#273852' })
-    $outer.Add_MouseLeave({ param($sender,$e) $sender.Background = Brush '#1B2638'; $sender.BorderBrush = Brush '#34445E' })
+    $outer.Add_MouseEnter({ param($sender,$e) $sender.Background = Brush '#1C2C38'; $sender.BorderBrush = Brush '#48687D' })
+    $outer.Add_MouseLeave({ param($sender,$e) $sender.Background = Brush '#17232D'; $sender.BorderBrush = Brush '#304450' })
     $outer.Add_PreviewMouseLeftButtonDown({
         param($sender,$e)
         $source = $e.OriginalSource
@@ -437,10 +482,10 @@ function New-Card($item) {
             [string]$e.Data.GetData('LauncherHubPath') -ne [string]$sender.Tag) {
             [System.Windows.DragDropEffects]::Move
         } else { [System.Windows.DragDropEffects]::None }
-        $sender.BorderBrush = if ($e.Effects -eq [System.Windows.DragDropEffects]::Move) { Brush '#74D8FF' } else { Brush '#34445E' }
+        $sender.BorderBrush = if ($e.Effects -eq [System.Windows.DragDropEffects]::Move) { Brush '#74D8FF' } else { Brush '#304450' }
         $e.Handled = $true
     })
-    $outer.Add_DragLeave({ param($sender,$e) $sender.BorderBrush = Brush '#34445E' })
+    $outer.Add_DragLeave({ param($sender,$e) $sender.BorderBrush = Brush '#304450' })
     $outer.Add_Drop({
         param($sender,$e)
         if (-not $e.Data.GetDataPresent('LauncherHubPath')) { return }
@@ -464,7 +509,7 @@ function New-Card($item) {
         $e.Handled = $true
     })
     $cardsPanel.Children.Add($outer) | Out-Null
-    $script:cards += [pscustomobject]@{ Name=$item.Name; Path=$item.Path; Meta=$meta; Dot=$dot; State=$state; Badge=$badge; BadgeText=$badgeText; UpdateButton=$update; Operation=$operation; CanUpdate=$false }
+    $script:cards += [pscustomobject]@{ Name=$item.Name; Path=$item.Path; Meta=$meta; Dot=$dot; State=$state; Badge=$badge; BadgeText=$badgeText; UpdateButton=$update; Operation=$operation; CanUpdate=$false; Outer=$outer; StatusDot=$statusDot; OpenButton=$open; MenuButton=$menuButton; AutoStart=$autoStart }
 }
 
 function Rebuild-Cards {
@@ -482,7 +527,7 @@ function Refresh-Processes {
     foreach ($card in $script:cards) {
         $running = @($names | Where-Object { $_ -match $card.Meta.Process }).Count -gt 0
         if ($running) {
-            $card.Dot.Fill = Brush '#48DF8D'; $card.State.Text = 'Läuft gerade'
+            $card.Dot.Fill = Brush '#55DF9B'; $card.State.Text = 'Läuft'
             $card.State.Foreground = Brush '#9DF0BF'; $active++
         } else {
             $card.Dot.Fill = Brush '#687A91'; $card.State.Text = 'Geschlossen'
@@ -540,15 +585,20 @@ function Apply-UpdateResults {
     foreach ($card in $script:cards) {
         $status = Get-HubPackageStatus -PackageId $card.Meta.Package -UpgradeLines $script:upgradeLines -InstalledLines $script:installedLines -ActualVersion (Get-ActualVersion $card)
         $card.CanUpdate = $script:updatesReady -and -not $script:checkError -and $status.CanUpdate
-        $card.Badge.Background = Brush '#3B382A'; $card.BadgeText.Foreground = Brush '#FFD793'
-        $card.BadgeText.Text = $status.Text
+        $card.Badge.Background = Brush 'Transparent'; $card.BadgeText.Foreground = Brush '#A8BECD'
+        $card.StatusDot.Fill = Brush '#8FA5B5'
+        $card.BadgeText.Text = $status.Text -replace '^[✓●]\s*', ''
         if ($card.Meta.Package -and -not $script:updatesReady) { $card.BadgeText.Text = 'Versionsprüfung läuft' }
         elseif ($card.Meta.Package -and $script:checkError) { $card.BadgeText.Text = 'Version nicht prüfbar' }
         elseif ($status.Tone -eq 'Current') {
-            $card.Badge.Background = Brush '#28423D'; $card.BadgeText.Foreground = Brush '#B7E5D4'
+            $card.BadgeText.Foreground = Brush '#A8BECD'
+        }
+        if ($card.CanUpdate) {
+            $card.BadgeText.Text = 'Update verfügbar'
+            $card.BadgeText.Foreground = Brush '#FFCB75'; $card.StatusDot.Fill = Brush '#FFBE55'
         }
         $card.BadgeText.TextTrimming = 'CharacterEllipsis'
-        $card.BadgeText.ToolTip = $card.BadgeText.Text
+        $card.BadgeText.ToolTip = if ($card.CanUpdate) { "Update auf $($status.Available)" } else { $card.BadgeText.Text }
         if ($card.CanUpdate) { $hintCount++ }
         $card.UpdateButton.Content = if ($card.Meta.Package) { 'Aktualisieren' } else { 'Im Launcher prüfen' }
         $card.UpdateButton.IsEnabled = -not $script:installCurrent -and ($card.CanUpdate -or -not $card.Meta.Package)
@@ -565,10 +615,14 @@ function Apply-UpdateResults {
         } elseif (@($script:installQueue.ToArray() | Where-Object Package -eq $card.Meta.Package).Count -gt 0) {
             $card.Operation.Text = 'Wartet auf Aktualisierung …'; $card.Operation.Foreground = Brush '#FFDBA3'
         }
+        $card.OpenButton.IsEnabled = -not ($script:installCurrent -and $card.Meta.Package -eq $script:installCurrent.Package)
     }
     $updateCount.Text = if (-not $script:updatesReady) { 'Updates werden geprüft' } elseif ($script:checkError) { 'Prüfung nicht verfügbar' } else { "$hintCount Updates verfügbar" }
     $updateAllButton.IsEnabled = $hintCount -gt 0 -and -not $script:installCurrent -and -not $script:updateProcess
     $refreshButton.IsEnabled = -not $script:installCurrent -and -not $script:updateProcess
+    $updateNavCount.Text = [string]$hintCount
+    $footerState.Text = if ($script:installCurrent) { 'Aktualisierung läuft' } elseif (-not $script:updatesReady) { 'Prüfung läuft' } elseif ($script:checkError) { 'Prüfung nicht verfügbar' } else { 'Prüfung abgeschlossen' }
+    Update-HubView
 }
 
 function Start-LauncherUpdates([object[]]$selectedCards) {
@@ -626,6 +680,9 @@ function Read-HubWorkerResult([string]$path, [string]$mode) {
     return $result
 }
 
+Connect-HubUI
+$window.Height = [math]::Min($window.Height, [System.Windows.SystemParameters]::WorkArea.Height - 24)
+$window.Width = [math]::Min($window.Width, [System.Windows.SystemParameters]::WorkArea.Width - 24)
 $timer = [System.Windows.Threading.DispatcherTimer]::new(); $timer.Interval = [TimeSpan]::FromSeconds(3)
 $timer.Add_Tick({
     Refresh-Processes
@@ -645,7 +702,7 @@ $timer.Add_Tick({
             if ($result.State -ne 'Succeeded' -or $result.Error) { throw $result.Error }
             $script:upgradeLines = @($result.Upgrade -split "`r?`n")
             $script:installedLines = @($result.Installed -split "`r?`n")
-            $footer.Text = ($script:batchSummary + " Prüfung: $(Get-Date -Format 'HH:mm') · Updates lassen sich einzeln oder gemeinsam starten.").Trim()
+            $footer.Text = ($script:batchSummary + " Zuletzt geprüft: $(Get-Date -Format 'HH:mm')").Trim()
         } catch {
             $script:checkError = $_.Exception.Message
             $footer.Text = ($script:batchSummary + ' Updateprüfung nicht verfügbar: ' + $script:checkError).Trim()
@@ -657,11 +714,7 @@ $timer.Add_Tick({
 })
 $refreshButton.Add_Click({ $script:batchSummary = ''; Refresh-Processes; Start-UpdateCheck })
 $updateAllButton.Add_Click({ Start-LauncherUpdates @($script:cards) })
-$scanButton.Add_Click({
-    $added = Add-Detected
-    Rebuild-Cards
-    $footer.Text = if ($added) { "$added Launcher automatisch hinzugefügt." } else { 'Keine weiteren bekannten Launcher in Desktop und Startmenü gefunden.' }
-})
+$scanButton.Add_Click({ Invoke-HubScan })
 $addButton.Add_Click({
     $dialog = [Microsoft.Win32.OpenFileDialog]::new()
     $dialog.Title = 'Launcher hinzufügen'

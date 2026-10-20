@@ -12,7 +12,7 @@ internal static class LauncherHubStart
         try
         {
             string directory = Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location);
-            foreach (string file in new[] { "LauncherHub.ps1", "LauncherHubUpdates.ps1", "LauncherHub.UpdateCore.ps1" })
+            foreach (string file in new[] { "LauncherHub.ps1", "LauncherHubUpdates.ps1", "LauncherHub.UpdateCore.ps1", "LauncherHub.xaml", "LauncherHub.Card.xaml" })
                 if (!File.Exists(Path.Combine(directory, file)))
                     throw new FileNotFoundException("Bitte das gesamte ZIP entpacken. Im Ordner fehlt: " + file);
 

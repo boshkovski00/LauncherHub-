@@ -44,14 +44,28 @@ $ast = [System.Management.Automation.Language.Parser]::ParseFile((Join-Path $rep
 foreach ($node in $ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] }, $false)) {
     Invoke-Expression $node.Extent.Text
 }
-foreach ($variable in @('catalog','xaml')) {
+foreach ($variable in @('catalog')) {
     $assignment = $ast.Find({ param($n) $n -is [System.Management.Automation.Language.AssignmentStatementAst] -and $n.Left.VariablePath.UserPath -eq $variable }, $false)
     Invoke-Expression $assignment.Extent.Text
 }
+$xaml = Get-Content -LiteralPath (Join-Path $repo 'LauncherHub.xaml') -Raw -Encoding UTF8
+$cardXaml = Get-Content -LiteralPath (Join-Path $repo 'LauncherHub.Card.xaml') -Raw -Encoding UTF8
 $scratch = Join-Path ([IO.Path]::GetTempPath()) ('LauncherHub-test-' + [guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Path $scratch | Out-Null
 try {
     $appData=$scratch; $startupFolder=$scratch
+    $iconTarget=Join-Path $env:WINDIR 'System32\notepad.exe'
+    $directIcon=Get-IconSource $iconTarget
+    Assert ($directIcon -and $directIcon.PixelWidth -eq 64 -and $directIcon.IsFrozen) 'Native icons are extracted at high resolution'
+    $shortcutPath=Join-Path $scratch 'Icon test.lnk'
+    $shell=New-Object -ComObject WScript.Shell
+    $shortcut=$shell.CreateShortcut($shortcutPath); $shortcut.TargetPath=$iconTarget; $shortcut.Save()
+    $shortcutIcon=Get-IconSource $shortcutPath
+    $stride=[int](($directIcon.PixelWidth*$directIcon.Format.BitsPerPixel+7)/8)
+    $directPixels=New-Object byte[] ($stride*$directIcon.PixelHeight)
+    $shortcutPixels=New-Object byte[] ($stride*$directIcon.PixelHeight)
+    $directIcon.CopyPixels($directPixels,$stride,0); $shortcutIcon.CopyPixels($shortcutPixels,$stride,0)
+    Assert ([Convert]::ToBase64String($directPixels) -eq [Convert]::ToBase64String($shortcutPixels)) 'Shortcut icons use target resources without link overlays'
     $statusPath=Join-Path $scratch 'check.json'; $installPath=Join-Path $scratch 'install.json'
     $window = [Windows.Markup.XamlReader]::Load([System.Xml.XmlNodeReader]::new([xml]$xaml))
     $cardsPanel=$window.FindName('Cards'); $totalCount=$window.FindName('TotalCount')
@@ -66,6 +80,7 @@ try {
     $script:cards=@(); $script:updateProcess=$null; $script:installProcess=$null; $script:installCurrent=$null
     $script:installQueue=New-Object 'System.Collections.Generic.Queue[object]'
     $script:installResults=@{}; $script:updatesReady=$true; $script:checkError=''; $script:batchSummary=''
+    $script:activeView='all'
     $script:upgradeLines=@($rows[0], 'EA ElectronicArts.EADesktop 1.0.0 2.0.0 winget')
     $script:installedLines=@(); $script:installDone=0; $script:installTotal=0
     $script:workerCalls=New-Object 'System.Collections.Generic.List[string]'
@@ -75,12 +90,24 @@ try {
         $worker | Add-Member ScriptMethod Dispose { }
         return $worker
     }
+    Connect-HubUI
     Rebuild-Cards
     Assert ($script:cards.Count -eq 3 -and $updateAllButton.IsEnabled) 'Real cards expose available updates'
     Assert ($script:cards[2].UpdateButton.Content -eq 'Im Launcher prüfen') 'Unsupported app opens launcher'
+    Assert ([System.Windows.Shell.WindowChrome]::GetIsHitTestVisibleInChrome($allTab)) 'Navigation remains clickable in the custom title bar'
+    Assert ([System.Windows.Shell.WindowChrome]::GetIsHitTestVisibleInChrome($window.FindName('CloseButton'))) 'Caption controls remain clickable'
+    Assert ($window.FindName('SettingsButton').ContextMenu.Items.Count -eq 2) 'Detection and update log remain accessible in settings'
+    Assert ($script:cards[0].MenuButton.ContextMenu.Items[0].Header -eq 'Aus dem Hub entfernen') 'Remove action remains available'
+    $updatesTab.IsChecked = $true
+    Assert (@($script:cards | Where-Object { $_.Outer.Visibility -eq 'Visible' }).Count -eq 2) 'Updates tab filters to applicable packages'
+    Assert ($updateNavCount.Text -eq '2') 'Updates tab count matches applicable packages'
+    $allTab.IsChecked = $true
+    Assert (@($script:cards | Where-Object { $_.Outer.Visibility -eq 'Visible' }).Count -eq 3) 'All tab restores unsupported launchers'
     Start-LauncherUpdates @($script:cards + $script:cards[0])
     Assert ($script:workerCalls.Count -eq 1 -and $script:installQueue.Count -eq 1) 'One worker and deduplicated queue'
     Assert (-not $updateAllButton.IsEnabled -and -not $refreshButton.IsEnabled) 'Disable overlapping operations'
+    $activeCard = @($script:cards | Where-Object { $_.Meta.Package -eq $script:installCurrent.Package })[0]
+    Assert (-not $activeCard.OpenButton.IsEnabled) 'Updating launcher cannot be opened during installation'
     Start-LauncherUpdates @($script:cards)
     Assert ($script:workerCalls.Count -eq 1) 'Double click cannot launch duplicate installs'
     Rebuild-Cards
@@ -114,17 +141,47 @@ try {
     $script:installProcess.HasExited=$true
     . $tick
     Assert ($script:batchSummary -match '1 abgeschlossen' -and $script:installResults['Valve.Steam'].State -eq 'Succeeded') 'Single-update success is recorded and rechecked'
+    $script:updateProcess=$null; $script:updatesReady=$true; $script:installResults=@{}
+    $savedEntries=$script:entries
+    $script:entries=@(); Rebuild-Cards
+    Assert ($emptyState.Visibility -eq 'Visible' -and $scanButton.Visibility -eq 'Visible') 'Empty hub offers detection'
+    $updatesTab.IsChecked=$true
+    Assert ($emptyTitle.Text -eq 'Keine offenen Updates.' -and $scanButton.Visibility -eq 'Collapsed') 'Empty updates view does not imply all programs were verified'
+    $script:checkError='Fixture network error'; Apply-UpdateResults
+    Assert ($emptyTitle.Text -eq 'Prüfung nicht verfügbar') 'Failed update check is distinguished from no pending updates'
+    $script:checkError=''; $script:entries=$savedEntries; $allTab.IsChecked=$true; Rebuild-Cards
+    $root=$window.Content
+    foreach ($size in @(@(1240,940),@(1000,700),@(760,520))) {
+        $root.Measure([System.Windows.Size]::new($size[0],$size[1]))
+        $root.Arrange([System.Windows.Rect]::new(0,0,$size[0],$size[1])); $root.UpdateLayout()
+        Update-HubLayout $size[0]; $root.UpdateLayout()
+        $first=$script:cards[0].Outer.TranslatePoint([System.Windows.Point]::new(0,0),$cardsPanel)
+        $second=$script:cards[1].Outer.TranslatePoint([System.Windows.Point]::new(0,0),$cardsPanel)
+        $expectedTwo=$size[0] -ge 1000
+        Assert (($expectedTwo -and $second.X -gt $first.X) -or (-not $expectedTwo -and $second.Y -gt $first.Y)) "Responsive card columns at $($size[0])"
+        $actions=$window.FindName('HeaderActions')
+        $position=$actions.TranslatePoint([System.Windows.Point]::new(0,0),$root)
+        Assert ($position.X -ge 0 -and $position.X+$actions.ActualWidth -le $size[0]) "Header actions fit at $($size[0])"
+        Assert ($script:cards[0].Outer.ActualWidth -le $cardsScroll.ViewportWidth) "Card width fits viewport at $($size[0])"
+    }
     if ($PreviewDirectory) {
         New-Item -ItemType Directory -Path $PreviewDirectory -Force | Out-Null
         $script:updateProcess=$null; $script:updatesReady=$true; $script:installResults=@{}
-        $script:upgradeLines=@($rows[0], 'EA ElectronicArts.EADesktop 1.0 2.0 winget')
-        $script:entries += @([pscustomobject]@{ Name='Epic Games Launcher'; Path=(Join-Path $scratch 'Epic.exe') }, [pscustomobject]@{ Name='Rockstar Games Launcher'; Path=(Join-Path $scratch 'Rockstar.exe') })
+        $script:upgradeLines=@($rows[0], 'EA ElectronicArts.EADesktop 1.0 2.0 winget', 'Ubisoft Ubisoft.Connect 1.0 2.0 winget')
+        $script:installedLines=@('Epic EpicGames.EpicGamesLauncher 2.0 winget', 'Battle.net Blizzard.BattleNet 2.0 winget', 'GOG GOG.Galaxy 2.0 winget')
+        $desktop=[Environment]::GetFolderPath('DesktopDirectory')
+        $detected=@(Find-Launchers)
+        $script:entries=@(foreach ($name in @('Steam','Epic Games Launcher','EA','Battle.net','Ubisoft Connect','GOG GALAXY')) {
+            $match=@($detected | Where-Object Name -eq $name) | Select-Object -First 1
+            if ($match) { $match } else { [pscustomobject]@{ Name=$name; Path=(Join-Path $scratch ($name+'.exe')) } }
+        })
         Rebuild-Cards
-        $footer.Text='2 Updates verfügbar · Kontostatus ist getrennt vom Laufstatus.'
-        foreach ($size in @(@(1160,800),@(760,520))) {
+        $footer.Text='Vorschau mit Testdaten · Zuletzt geprüft: 18:45'
+        foreach ($size in @(@(1240,940),@(1160,800),@(760,520))) {
             $root=$window.Content
             $root.Measure([System.Windows.Size]::new($size[0],$size[1]))
             $root.Arrange([System.Windows.Rect]::new(0,0,$size[0],$size[1])); $root.UpdateLayout()
+            Update-HubLayout $size[0]; $root.UpdateLayout()
             $bitmap=[System.Windows.Media.Imaging.RenderTargetBitmap]::new($size[0],$size[1],96,96,[System.Windows.Media.PixelFormats]::Pbgra32)
             $bitmap.Render($root)
             $encoder=[System.Windows.Media.Imaging.PngBitmapEncoder]::new()
